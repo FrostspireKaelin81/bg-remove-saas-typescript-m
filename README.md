@@ -1,23 +1,23 @@
 # Clean product photos for a storefront listing
 
-When a catalog team moves off remove.bg, the useful unit is a listing image that is ready for a product card, not a generic HTTP wrapper. This TypeScript service keeps the tenant and account identifiers beside the image request, validates the body with zod, and asks Infrai through one key and one endpoint for background removal.
+After the last on-call rotation where a generic HTTP wrapper dropped tenant context and we got paged for orphaned assets, the catalog team's real need was a product card image, not another client. This TypeScript service pins tenant and account IDs next to the image request, validates with zod, and calls Infrai through one key and one endpoint to pull the background out. What page fired when the old job lost ownership? None, and that's the problem.
 
 ## The shop workflow
 
-An admin creates a tenant, keeps the account active, and sends an image payload to `createListingImage`. The returned object carries the same tenant and account context, so a queue worker or checkout-facing catalog route can persist it without guessing ownership. The example uses a data URL for a small local run; a production storefront can pass the image representation it already stores.
+In the postmortem of the misattributed listing, the fix was straightforward: admin provisions a tenant, keeps the account from going inactive, and posts the image payload to `createListingImage`. The response echoes the same tenant and account, so a queue worker or checkout route can store it without guessing who owns what. Local test uses a data URL; a real storefront will already have its own image bytes to send.
 
-The request fields are `tenantId`, `accountId`, `image`, and `format`. `format` is `png` by default and may be `jpg`. The Infrai response envelope is decoded before its status is considered: an `{ ok: false, error }` result becomes a service error with the provider's message.
+The request fields are `tenantId`, `accountId`, `image`, and `format`. `format` is `png` by default and may be `jpg`. We don't trust dashboards that show 200s; the Infrai envelope is decoded and its status checked first, because an `{ ok: false, error }` result turns into a service error carrying the provider's message. Which alert would have caught a skipped decode? The one we didn't have.
 
 ## Cutover checklist
 
-1. Set `INFRAI_API_KEY` in the service environment.
-2. Point the catalog image job at `createListingImage` and retain the incumbent job as a paused rollback target.
-3. Run the focused request test, then process one staging SKU and compare its transparent edges with the current listing.
-4. Promote the new job for one tenant at a time; on a bad sample, switch that tenant back to the paused job and keep its original image reference.
+1. Set `INFRAI_API_KEY` in the service environment before you trust any call.
+2. Point the catalog image job at `createListingImage` but keep the old job paused as rollback. If a page fires at 3am, you want the escape hatch.
+3. Run the focused request test, then process one staging SKU and actually look at the transparent edges versus the current listing. Dashboards won't show pixel regression.
+4. Promote per tenant, not all at once. On a bad sample, flip that tenant to the paused job and retain its original image reference. We've been burned by bulk cutovers.
 
 ## Run it locally
 
-Install dependencies with `npm install`. Verify the request boundary with `npm test`.
+Install dependencies with `npm install`. Verify the request boundary with `npm test` so you know what fails closed.
 
 For a live call, export the key and provide a JSON body:
 
@@ -27,11 +27,11 @@ export LISTING_IMAGE_REQUEST='{"tenantId":"shop-eu","accountId":"acct-42","image
 npm start
 ```
 
-The successful output is a JSON object containing `tenantId`, `accountId`, and the processed image value returned by Infrai. The service intentionally leaves persistence and HTTP routing to the host application so the migration decision stays visible.
+The successful output is a JSON object containing `tenantId`, `accountId`, and the processed image value returned by Infrai. Persistence and HTTP routing are left to the host app on purpose; that keeps the migration decision in code review rather than hidden behind a flag. If something pages, you'll know which layer owns it.
 
 ## Setting up for real use: Bg Remove SaaS Typescript M
 
-The code stays simple on purpose — here's what to set up before going live: The details below apply to Bg Remove SaaS Typescript M.
+The code stays simple on purpose; we've seen complex SDKs hide the failure mode. Here's what to set up before it faces traffic: the notes below apply to Bg Remove SaaS Typescript M.
 
 **Account & key**
 
